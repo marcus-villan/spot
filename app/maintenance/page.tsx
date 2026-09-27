@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { supabase } from "../lib/supabase";
 import { useSpotRealtime, type SpotRealtimeRow } from "../lib/spot-realtime";
@@ -31,6 +31,34 @@ type ForumUpdate = {
   message: string;
   created_at: string;
 };
+
+type Facility = {
+  id: string;
+  name: string;
+  room: string;
+  keycode: string;
+  is_archived: boolean;
+  created_at: string;
+};
+
+type FacilityDraft = {
+  id?: string;
+  name: string;
+  room: string;
+  keycode: string;
+};
+
+function mergeFacilities(current: Facility[], incoming: Facility[], preserveCurrent = false) {
+  const byId = new Map(incoming.map((facility) => [facility.id, facility]));
+  for (const facility of current) {
+    if (preserveCurrent || !byId.has(facility.id)) byId.set(facility.id, facility);
+  }
+  return Array.from(byId.values()).sort((a, b) =>
+    Number(a.is_archived) - Number(b.is_archived) ||
+    a.name.localeCompare(b.name) ||
+    a.room.localeCompare(b.room)
+  );
+}
 
 function mergeReports(current: Report[], incoming: Report[]) {
   const byId = new Map(
@@ -77,6 +105,16 @@ async function fetchUpdatesForReports(reportIds: string[]) {
 }
 
 export default function MaintenancePage() {
+  const [facilities, setFacilities] = useState<Facility[]>([]);
+  const [facilitiesLoading, setFacilitiesLoading] = useState(true);
+  const [facilitiesError, setFacilitiesError] = useState(false);
+  const [facilityFeedback, setFacilityFeedback] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  const [facilityDraft, setFacilityDraft] = useState<FacilityDraft | null>(null);
+  const [facilityFormError, setFacilityFormError] = useState("");
+  const [isSavingFacility, setIsSavingFacility] = useState(false);
+  const [facilityArchiveTarget, setFacilityArchiveTarget] = useState<Facility | null>(null);
+  const [facilityArchiveError, setFacilityArchiveError] = useState("");
+  const [isArchivingFacility, setIsArchivingFacility] = useState(false);
   const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -90,6 +128,146 @@ export default function MaintenancePage() {
   const [updatesByReportId, setUpdatesByReportId] = useState<Record<string, ForumUpdate[]>>({});
   const [updatesLoadError, setUpdatesLoadError] = useState(false);
   const archivedReportIdsRef = useRef(new Set<string>());
+  const archivedFacilityIdsRef = useRef(new Set<string>());
+
+  async function fetchFacilities() {
+    const { data, error } = await supabase
+      .from("facilities")
+      .select("id, name, room, keycode, is_archived, created_at")
+      .order("name", { ascending: true });
+
+    return {
+      facilities: !error && data ? (data as Facility[]) : null,
+      hasError: Boolean(error),
+    };
+  }
+
+  async function loadFacilities() {
+    setFacilitiesLoading(true);
+    setFacilitiesError(false);
+    try {
+      const result = await fetchFacilities();
+      setFacilitiesError(result.hasError);
+      if (result.facilities) {
+        const facilitiesWithoutStaleArchives = result.facilities.map((facility) =>
+          archivedFacilityIdsRef.current.has(facility.id)
+            ? { ...facility, is_archived: true }
+            : facility
+        );
+        setFacilities((current) => mergeFacilities(
+          current,
+          facilitiesWithoutStaleArchives,
+          true
+        ));
+      }
+    } catch {
+      setFacilitiesError(true);
+    } finally {
+      setFacilitiesLoading(false);
+    }
+  }
+
+  function openFacilityForm(target?: Facility) {
+    setFacilityFeedback(null);
+    setFacilityFormError("");
+    setFacilityDraft(target
+      ? { id: target.id, name: target.name, room: target.room, keycode: target.keycode }
+      : { name: "", room: "", keycode: "" }
+    );
+  }
+
+  async function saveFacility(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!facilityDraft) return;
+
+    const name = facilityDraft.name.trim();
+    const room = facilityDraft.room.trim();
+    const keycode = facilityDraft.keycode.trim().toUpperCase();
+    if (!name || !room || !keycode) {
+      setFacilityFormError("Enter a facility name, room, and keycode.");
+      return;
+    }
+
+    setIsSavingFacility(true);
+    setFacilityFormError("");
+    try {
+      const query = facilityDraft.id
+        ? supabase
+            .from("facilities")
+            .update({ name, room, keycode })
+            .eq("id", facilityDraft.id)
+        : supabase
+            .from("facilities")
+            .insert({ name, room, keycode, is_archived: false });
+      const { data, error } = await query
+        .select("id, name, room, keycode, is_archived, created_at")
+        .single();
+
+      if (error) {
+        const duplicate = error.code === "23505" || /duplicate key|unique constraint/i.test(error.message);
+        setFacilityFormError(duplicate
+          ? "That keycode is already assigned to another facility."
+          : "The facility could not be saved. Please try again."
+        );
+        return;
+      }
+
+      const savedFacility = data as Facility;
+      setFacilities((current) => mergeFacilities(current, [savedFacility]));
+      setFacilityDraft(null);
+      setFacilityFeedback({
+        kind: "success",
+        text: facilityDraft.id ? "Facility changes saved." : "Facility added.",
+      });
+    } catch {
+      setFacilityFormError("The facility could not be saved. Please try again.");
+    } finally {
+      setIsSavingFacility(false);
+    }
+  }
+
+  async function confirmFacilityArchive() {
+    if (!facilityArchiveTarget) return;
+    setIsArchivingFacility(true);
+    setFacilityArchiveError("");
+    try {
+      const { data, error } = await supabase
+        .from("facilities")
+        .update({ is_archived: true })
+        .eq("id", facilityArchiveTarget.id)
+        .eq("is_archived", false)
+        .select("id, name, room, keycode, is_archived, created_at")
+        .maybeSingle();
+
+      if (error || !data) {
+        setFacilityArchiveError("The facility could not be archived. Please try again.");
+        return;
+      }
+
+      const archivedFacility = data as Facility;
+      archivedFacilityIdsRef.current.add(archivedFacility.id);
+      setFacilities((current) => mergeFacilities(current, [archivedFacility]));
+      setFacilityArchiveTarget(null);
+      setFacilityFeedback({ kind: "success", text: "Facility archived. Existing reports and history are unchanged." });
+    } catch {
+      setFacilityArchiveError("The facility could not be archived. Please try again.");
+    } finally {
+      setIsArchivingFacility(false);
+    }
+  }
+
+  const closeFacilityForm = useCallback(() => {
+    if (!isSavingFacility) {
+      setFacilityDraft(null);
+      setFacilityFormError("");
+    }
+  }, [isSavingFacility]);
+  const closeFacilityArchive = useCallback(() => {
+    if (!isArchivingFacility) {
+      setFacilityArchiveTarget(null);
+      setFacilityArchiveError("");
+    }
+  }, [isArchivingFacility]);
 
   async function fetchReports() {
     const { data, error } = await supabase
@@ -180,6 +358,29 @@ export default function MaintenancePage() {
   }
 
   useEffect(() => {
+    async function loadInitialFacilities() {
+      try {
+        const result = await fetchFacilities();
+        setFacilitiesError(result.hasError);
+        if (result.facilities) {
+          const facilitiesWithoutStaleArchives = result.facilities.map((facility) =>
+            archivedFacilityIdsRef.current.has(facility.id)
+              ? { ...facility, is_archived: true }
+              : facility
+          );
+          setFacilities((current) => mergeFacilities(
+            current,
+            facilitiesWithoutStaleArchives,
+            true
+          ));
+        }
+      } catch {
+        setFacilitiesError(true);
+      } finally {
+        setFacilitiesLoading(false);
+      }
+    }
+
     async function loadInitialReports() {
       try {
         const result = await fetchReports();
@@ -200,6 +401,7 @@ export default function MaintenancePage() {
       }
     }
 
+    void loadInitialFacilities();
     void loadInitialReports();
   }, [loadUpdatesForReports]);
 
@@ -321,10 +523,47 @@ export default function MaintenancePage() {
     ));
   }, []);
 
+  const handleFacilityRealtimeChange = useCallback(async (record: SpotRealtimeRow) => {
+    if (typeof record.id !== "string") return;
+    const id = record.id;
+
+    if (record.is_archived === true) {
+      archivedFacilityIdsRef.current.add(id);
+      setFacilities((current) => current.map((availableFacility) =>
+        availableFacility.id === id ? { ...availableFacility, is_archived: true } : availableFacility
+      ));
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("facilities")
+      .select("id, name, room, keycode, is_archived, created_at")
+      .eq("id", id)
+      .single();
+
+    if (error || !data) return;
+    const facilityRecord = data as Facility;
+    if (facilityRecord.is_archived) {
+      archivedFacilityIdsRef.current.add(id);
+      setFacilities((current) => current.map((availableFacility) =>
+        availableFacility.id === id ? { ...availableFacility, is_archived: true } : availableFacility
+      ));
+      return;
+    }
+
+    archivedFacilityIdsRef.current.delete(id);
+    setFacilities((current) => mergeFacilities(current, [facilityRecord]));
+  }, []);
+
   useSpotRealtime("spot-maintenance-workflow", {
     onReportInsert: handleReportRealtimeInsert,
     onReportUpdate: handleReportRealtimeUpdate,
+    onFacilityInsert: handleFacilityRealtimeChange,
+    onFacilityUpdate: handleFacilityRealtimeChange,
   });
+
+  const activeFacilities = facilities.filter((facility) => !facility.is_archived);
+  const archivedFacilities = facilities.filter((facility) => facility.is_archived);
 
   return (
     <main className="app-frame">
@@ -351,6 +590,98 @@ export default function MaintenancePage() {
             <span className="workflow-step"><i className="workflow-dot dot-progress" /> In progress</span>
             <span className="workflow-divider" aria-hidden="true">/</span>
             <span className="workflow-step"><i className="workflow-dot dot-resolved" /> Resolved</span>
+          </div>
+        </section>
+
+        <section className="facility-section" aria-labelledby="facilities-title">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow"><span className="eyebrow-index">02</span> FACILITY REGISTER</p>
+              <h2 className="section-title" id="facilities-title">Facilities</h2>
+            </div>
+            <button className="button button-primary" type="button" onClick={() => openFacilityForm()}>
+              Add Facility
+            </button>
+          </div>
+
+          {facilityFeedback && (
+            <p
+              className={`notice notice-${facilityFeedback.kind}`}
+              role={facilityFeedback.kind === "error" ? "alert" : "status"}
+              aria-live={facilityFeedback.kind === "error" ? "assertive" : "polite"}
+            >
+              <span className="notice-marker" aria-hidden="true" />
+              {facilityFeedback.text}
+            </p>
+          )}
+
+          <div className="facility-list" aria-live="polite" aria-busy={facilitiesLoading}>
+            {facilitiesLoading ? (
+              <p className="list-state">Loading facilities…</p>
+            ) : facilitiesError ? (
+              <div className="list-state list-state-error" role="alert">
+                <p>Facilities could not be loaded.</p>
+                <button className="text-button" type="button" onClick={loadFacilities}>Try again</button>
+              </div>
+            ) : facilities.length === 0 ? (
+              <p className="list-state">No facilities have been added yet.</p>
+            ) : (
+              <>
+                {activeFacilities.length > 0 && (
+                  <div className="queue-list" aria-label="Active facilities">
+                    {activeFacilities.map((facility) => (
+                      <article className="queue-row" key={facility.id}>
+                        <div className="queue-report-copy">
+                          <div className="service-update-heading">
+                            <h3 className="report-title">{facility.name}</h3>
+                            <span className="status status-in-progress">ACTIVE</span>
+                          </div>
+                          <p className="report-location">
+                            {facility.room} <span aria-hidden="true">/</span> KEY / {facility.keycode}
+                          </p>
+                        </div>
+                        <div className="queue-row-action">
+                          <button className="button button-secondary" type="button" onClick={() => openFacilityForm(facility)}>
+                            Edit
+                          </button>
+                          <button className="button button-secondary" type="button" onClick={() => {
+                            setFacilityFeedback(null);
+                            setFacilityArchiveError("");
+                            setFacilityArchiveTarget(facility);
+                          }}>
+                            Archive
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+
+                {archivedFacilities.length > 0 && (
+                  <div className="queue-list" aria-label="Archived facilities">
+                    <p className="eyebrow"><span className="eyebrow-index">ARCHIVE</span> UNAVAILABLE FOR NEW REPORTS</p>
+                    {archivedFacilities.map((facility) => (
+                      <article className="queue-row" key={facility.id}>
+                        <div className="queue-report-copy">
+                          <div className="service-update-heading">
+                            <h3 className="report-title">{facility.name}</h3>
+                            <span className="status status-pending">ARCHIVED</span>
+                          </div>
+                          <p className="report-location">
+                            {facility.room} <span aria-hidden="true">/</span> KEY / {facility.keycode}
+                          </p>
+                        </div>
+                        <div className="queue-row-action">
+                          <button className="button button-secondary" type="button" onClick={() => openFacilityForm(facility)}>
+                            Edit
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </section>
 
@@ -424,6 +755,81 @@ export default function MaintenancePage() {
           </div>
         </section>
       </div>
+
+      {facilityDraft && (
+        <Dialog
+          title={facilityDraft.id ? "Edit facility" : "Add facility"}
+          description={facilityDraft.id
+            ? "Update the facility name, room, or keycode."
+            : "Register a facility so students can select it when reporting an issue."}
+          onClose={closeFacilityForm}
+          busy={isSavingFacility}
+        >
+          <form className="dialog-form" onSubmit={saveFacility}>
+            {facilityFormError && <p className="form-error" role="alert">{facilityFormError}</p>}
+            <label className="field-label" htmlFor="maintenance-facility-name">Facility name</label>
+            <input
+              id="maintenance-facility-name"
+              className="text-input"
+              value={facilityDraft.name}
+              onChange={(event) => setFacilityDraft((current) => current ? { ...current, name: event.target.value } : current)}
+              required
+              maxLength={120}
+              disabled={isSavingFacility}
+              data-dialog-initial-focus
+            />
+            <label className="field-label" htmlFor="maintenance-facility-room">Room</label>
+            <input
+              id="maintenance-facility-room"
+              className="text-input"
+              value={facilityDraft.room}
+              onChange={(event) => setFacilityDraft((current) => current ? { ...current, room: event.target.value } : current)}
+              required
+              maxLength={80}
+              disabled={isSavingFacility}
+            />
+            <label className="field-label" htmlFor="maintenance-facility-keycode">Keycode</label>
+            <input
+              id="maintenance-facility-keycode"
+              className="text-input"
+              value={facilityDraft.keycode}
+              onChange={(event) => setFacilityDraft((current) => current ? { ...current, keycode: event.target.value } : current)}
+              required
+              maxLength={80}
+              autoCapitalize="characters"
+              spellCheck={false}
+              disabled={isSavingFacility}
+            />
+            <div className="dialog-actions">
+              <button className="button button-secondary" type="button" onClick={closeFacilityForm} disabled={isSavingFacility}>Cancel</button>
+              <button
+                className="button button-primary"
+                type="submit"
+                disabled={isSavingFacility || !facilityDraft.name.trim() || !facilityDraft.room.trim() || !facilityDraft.keycode.trim()}
+              >
+                {isSavingFacility ? "Saving…" : facilityDraft.id ? "Save changes" : "Add Facility"}
+              </button>
+            </div>
+          </form>
+        </Dialog>
+      )}
+
+      {facilityArchiveTarget && (
+        <Dialog
+          title="Confirm facility archive"
+          description={`“${facilityArchiveTarget.name}” in ${facilityArchiveTarget.room} will be archived and removed from student facility selection. Existing reports and their history will remain unchanged.`}
+          onClose={closeFacilityArchive}
+          busy={isArchivingFacility}
+        >
+          {facilityArchiveError && <p className="form-error" role="alert">{facilityArchiveError}</p>}
+          <div className="dialog-actions">
+            <button className="button button-secondary" type="button" onClick={closeFacilityArchive} disabled={isArchivingFacility} data-dialog-initial-focus>Cancel</button>
+            <button className="button button-primary" type="button" onClick={confirmFacilityArchive} disabled={isArchivingFacility}>
+              {isArchivingFacility ? "Archiving…" : "Archive facility"}
+            </button>
+          </div>
+        </Dialog>
+      )}
 
       {pendingUpdate && (
         <Dialog

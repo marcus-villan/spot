@@ -9,6 +9,7 @@ type Facility = {
   name: string;
   room: string;
   keycode: string;
+  is_archived: boolean;
 };
 
 type Report = {
@@ -38,6 +39,20 @@ type ServiceUpdate = {
     facilities: { name: string; room: string } | null;
   };
 };
+
+function mergeFacilities(current: Facility[], incoming: Facility[], preserveCurrent = false) {
+  const byId = new Map(
+    incoming.filter((facility) => !facility.is_archived).map((facility) => [facility.id, facility])
+  );
+  for (const facility of current) {
+    if (!facility.is_archived && (preserveCurrent || !byId.has(facility.id))) {
+      byId.set(facility.id, facility);
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) =>
+    a.name.localeCompare(b.name) || a.room.localeCompare(b.room)
+  );
+}
 
 function mergeReports(current: Report[], incoming: Report[]) {
   const reportsById = new Map(
@@ -88,6 +103,7 @@ export default function Home() {
   const [facilitiesLoading, setFacilitiesLoading] = useState(true);
   const [facilitiesError, setFacilitiesError] = useState(false);
   const [facility, setFacility] = useState<Facility | null>(null);
+  const archivedFacilityIdsRef = useRef(new Set<string>());
   const [reports, setReports] = useState<Report[]>([]);
   const archivedReportIdsRef = useRef(new Set<string>());
   const [reportsLoading, setReportsLoading] = useState(true);
@@ -178,7 +194,10 @@ export default function Home() {
   }
 
   async function fetchFacilities() {
-    return supabase.from("facilities").select("id, name, room, keycode");
+    return supabase
+      .from("facilities")
+      .select("id, name, room, keycode, is_archived")
+      .eq("is_archived", false);
   }
 
   async function loadFacilities() {
@@ -193,7 +212,10 @@ export default function Home() {
         return;
       }
 
-      setFacilities((data ?? []) as Facility[]);
+      const activeFacilities = ((data ?? []) as Facility[]).filter(
+        (availableFacility) => !archivedFacilityIdsRef.current.has(availableFacility.id)
+      );
+      setFacilities((current) => mergeFacilities(current, activeFacilities, true));
     } catch {
       setFacilitiesError(true);
     } finally {
@@ -209,7 +231,10 @@ export default function Home() {
         if (error) {
           setFacilitiesError(true);
         } else {
-          setFacilities((data ?? []) as Facility[]);
+          const activeFacilities = ((data ?? []) as Facility[]).filter(
+            (availableFacility) => !archivedFacilityIdsRef.current.has(availableFacility.id)
+          );
+          setFacilities((current) => mergeFacilities(current, activeFacilities, true));
         }
       } catch {
         setFacilitiesError(true);
@@ -273,11 +298,12 @@ export default function Home() {
     try {
       const { data, error } = await supabase
         .from("facilities")
-        .select("id, name, room, keycode")
+        .select("id, name, room, keycode, is_archived")
         .eq("keycode", keycode.trim().toUpperCase())
+        .eq("is_archived", false)
         .single();
 
-      if (error || !data) {
+      if (error || !data || archivedFacilityIdsRef.current.has(data.id)) {
         setFacility(null);
         setNotice({ kind: "error", text: "No facility found for that keycode." });
         return;
@@ -298,6 +324,12 @@ export default function Home() {
 
   async function submitReport() {
     if (!facility || !title.trim() || !description.trim()) return;
+    if (facility.is_archived || archivedFacilityIdsRef.current.has(facility.id)) {
+      setFacility(null);
+      setShowReport(false);
+      setNotice({ kind: "error", text: "This facility is no longer available. Please select another facility." });
+      return;
+    }
 
     setLoading(true);
     setNotice(null);
@@ -378,6 +410,50 @@ export default function Home() {
     );
   }, []);
 
+  const handleFacilityRealtimeChange = useCallback(async (record: SpotRealtimeRow) => {
+    if (typeof record.id !== "string") return;
+    const id = record.id;
+
+    if (record.is_archived === true) {
+      archivedFacilityIdsRef.current.add(id);
+      setFacilities((current) => current.filter((availableFacility) => availableFacility.id !== id));
+      if (facility?.id === id) {
+        setFacility(null);
+        setShowReport(false);
+        setNotice({
+          kind: "error",
+          text: "This facility was archived and is no longer available. Please select another facility.",
+        });
+      }
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("facilities")
+      .select("id, name, room, keycode, is_archived")
+      .eq("id", id)
+      .single();
+
+    if (error || !data) return;
+    if (data.is_archived) {
+      archivedFacilityIdsRef.current.add(id);
+      setFacilities((current) => current.filter((availableFacility) => availableFacility.id !== id));
+      if (facility?.id === id) {
+        setFacility(null);
+        setShowReport(false);
+        setNotice({
+          kind: "error",
+          text: "This facility was archived and is no longer available. Please select another facility.",
+        });
+      }
+      return;
+    }
+
+    if (archivedFacilityIdsRef.current.has(id)) return;
+    archivedFacilityIdsRef.current.delete(id);
+    setFacilities((current) => mergeFacilities(current, [data as Facility]));
+  }, [facility?.id]);
+
   const handleForumUpdateRealtimeInsert = useCallback(async (record: SpotRealtimeRow) => {
     if (typeof record.id !== "string") return;
 
@@ -402,6 +478,8 @@ export default function Home() {
   useSpotRealtime("spot-student-workflow", {
     onReportUpdate: handleReportRealtimeUpdate,
     onForumUpdateInsert: handleForumUpdateRealtimeInsert,
+    onFacilityInsert: handleFacilityRealtimeChange,
+    onFacilityUpdate: handleFacilityRealtimeChange,
   });
 
   return (

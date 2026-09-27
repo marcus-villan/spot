@@ -10,6 +10,8 @@ type SpotRealtimeHandlers = {
   onReportInsert?: (record: SpotRealtimeRow) => void;
   onReportUpdate?: (record: SpotRealtimeRow) => void;
   onForumUpdateInsert?: (record: SpotRealtimeRow) => void;
+  onFacilityInsert?: (record: SpotRealtimeRow) => void;
+  onFacilityUpdate?: (record: SpotRealtimeRow) => void;
 };
 
 export function useSpotRealtime(
@@ -41,6 +43,17 @@ export function useSpotRealtime(
         { event: "INSERT", schema: "public", table: "forum_updates" },
         (payload: RealtimePostgresChangesPayload<SpotRealtimeRow>) => {
           handlersRef.current.onForumUpdateInsert?.(payload.new);
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "facilities" },
+        (payload: RealtimePostgresChangesPayload<SpotRealtimeRow>) => {
+          if (payload.eventType === "INSERT") {
+            handlersRef.current.onFacilityInsert?.(payload.new);
+          } else if (payload.eventType === "UPDATE") {
+            handlersRef.current.onFacilityUpdate?.(payload.new);
+          }
         }
       )
       .subscribe();
