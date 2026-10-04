@@ -1,17 +1,22 @@
 "use client";
-
+//maintenance page for SPOT, used by the maintenance team to manage reports and facilities
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { supabase } from "../lib/supabase";
 import { useSpotRealtime, type SpotRealtimeRow } from "../lib/spot-realtime";
+import { AuthGate } from "../components/auth-gate";
+import { useSpotAuth } from "../lib/auth";
 
-type ReportStatus = "Pending" | "In Progress" | "Resolved" | "Archived";
+type ReportStatus = "SUBMITTED" | "ACKNOWLEDGED" | "IN_PROGRESS" | "RESOLVED" | "CLOSED" | "Pending" | "In Progress" | "Resolved" | "Archived";
 
 type Report = {
   id: string;
   title: string;
   description: string;
   status: ReportStatus;
+  category: string;
+  priority: string;
+  assigned_to: string | null;
   created_at: string;
   updated_at: string;
   facilities: { name: string; room: string };
@@ -104,7 +109,9 @@ async function fetchUpdatesForReports(reportIds: string[]) {
   };
 }
 
-export default function MaintenancePage() {
+function MaintenanceContent() {
+  const { auth } = useSpotAuth();
+  const [mobilePanel, setMobilePanel] = useState<"queue" | "facilities">("queue");
   const [facilities, setFacilities] = useState<Facility[]>([]);
   const [facilitiesLoading, setFacilitiesLoading] = useState(true);
   const [facilitiesError, setFacilitiesError] = useState(false);
@@ -116,6 +123,10 @@ export default function MaintenancePage() {
   const [facilityArchiveError, setFacilityArchiveError] = useState("");
   const [isArchivingFacility, setIsArchivingFacility] = useState(false);
   const [reports, setReports] = useState<Report[]>([]);
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [priorityFilter, setPriorityFilter] = useState("ALL");
+  const [categoryFilter, setCategoryFilter] = useState("ALL");
+  const [facilityFilter, setFacilityFilter] = useState("ALL");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<PendingUpdate | null>(null);
@@ -272,8 +283,9 @@ export default function MaintenancePage() {
   async function fetchReports() {
     const { data, error } = await supabase
       .from("reports")
-      .select("id, title, description, status, created_at, updated_at, facilities(name, room)")
+      .select("id, title, description, status, category, priority, assigned_to, created_at, updated_at, facilities(name, room)")
       .neq("status", "Archived")
+      .neq("status", "CLOSED")
       .order("created_at", { ascending: false });
 
     return {
@@ -411,6 +423,7 @@ export default function MaintenancePage() {
       .update({ status, updated_at: new Date().toISOString() })
       .eq("id", id)
       .neq("status", "Archived")
+      .neq("status", "CLOSED")
       .select("id")
       .maybeSingle();
 
@@ -456,6 +469,7 @@ export default function MaintenancePage() {
       const { error } = await supabase.from("forum_updates").insert({
         report_id: reportId,
         message: updateMessage.trim(),
+        user_id: auth?.user.id,
       });
 
       if (error) {
@@ -487,7 +501,7 @@ export default function MaintenancePage() {
     if (typeof record.id !== "string" || record.status === "Archived") return;
     const { data, error } = await supabase
       .from("reports")
-      .select("id, title, description, status, created_at, updated_at, facilities(name, room)")
+      .select("id, title, description, status, category, priority, assigned_to, created_at, updated_at, facilities(name, room)")
       .eq("id", record.id)
       .single();
 
@@ -500,8 +514,8 @@ export default function MaintenancePage() {
     const id = record.id;
     const status = record.status;
     if (
-      typeof id !== "string" ||
-      (status !== "Pending" && status !== "In Progress" && status !== "Resolved" && status !== "Archived")
+      typeof id !== "string" || typeof status !== "string" ||
+      (!["Pending", "In Progress", "Resolved", "Archived", "SUBMITTED", "ACKNOWLEDGED", "IN_PROGRESS", "RESOLVED", "CLOSED"].includes(status))
     ) return;
 
     if (status === "Archived") {
@@ -515,10 +529,16 @@ export default function MaintenancePage() {
       return;
     }
 
+    if (status === "CLOSED") {
+      setReports((current) => current.filter((report) => report.id !== id));
+      setUpdatesByReportId((current) => { const next = { ...current }; delete next[id]; return next; });
+      return;
+    }
+
     archivedReportIdsRef.current.delete(id);
     const updatedAt = typeof record.updated_at === "string" ? record.updated_at : undefined;
     setReports((current) => current.map((report) => report.id === id
-      ? { ...report, status, updated_at: updatedAt ?? report.updated_at }
+      ? { ...report, status: status as ReportStatus, updated_at: updatedAt ?? report.updated_at }
       : report
     ));
   }, []);
@@ -564,6 +584,12 @@ export default function MaintenancePage() {
 
   const activeFacilities = facilities.filter((facility) => !facility.is_archived);
   const archivedFacilities = facilities.filter((facility) => facility.is_archived);
+  const visibleReports = reports
+    .filter(report => (statusFilter === "ALL" || report.status === statusFilter)
+      && (priorityFilter === "ALL" || report.priority === priorityFilter)
+      && (categoryFilter === "ALL" || report.category === categoryFilter)
+      && (facilityFilter === "ALL" || report.facilities.name === facilityFilter))
+    .sort((a, b) => ["URGENT", "HIGH", "NORMAL", "LOW"].indexOf(a.priority) - ["URGENT", "HIGH", "NORMAL", "LOW"].indexOf(b.priority));
 
   return (
     <main className="app-frame">
@@ -571,11 +597,16 @@ export default function MaintenancePage() {
         <Link className="wordmark" href="/" aria-label="Spot home">
           SPOT<span className="wordmark-mark">.</span>
         </Link>
-        <p className="header-context">FACILITY REPORTING / MAINTENANCE</p>
+        <p className="header-context">
+          <span className="desktop-header-context">FACILITY REPORTING / MAINTENANCE</span>
+          <span className="mobile-header-context">MAINTENANCE</span>
+        </p>
+        {auth?.role === "ADMIN" && <Link className="text-button" href="/admin">Admin</Link>}
+        {auth && <button className="text-button" type="button" onClick={() => void supabase.auth.signOut()}>Sign out</button>}
       </header>
 
       <div className="page-content">
-        <section className="maintenance-intro" aria-labelledby="queue-title">
+        <section className="maintenance-intro" data-mobile-view data-mobile-active={mobilePanel === "queue"} aria-labelledby="queue-title">
           <p className="eyebrow"><span className="eyebrow-index">01</span> MAINTENANCE / INTAKE</p>
           <div className="maintenance-title-row">
             <div>
@@ -593,7 +624,20 @@ export default function MaintenancePage() {
           </div>
         </section>
 
-        <section className="facility-section" aria-labelledby="facilities-title">
+        <div className="maintenance-metrics" data-mobile-view data-mobile-active={mobilePanel === "queue"} aria-label="Report totals">
+          <Stat label="Submitted" value={reports.filter((report) => report.status === "SUBMITTED" || report.status === "Pending").length} />
+          <Stat label="In progress" value={reports.filter((report) => report.status === "IN_PROGRESS" || report.status === "In Progress").length} />
+          <Stat label="Resolved" value={reports.filter((report) => report.status === "RESOLVED" || report.status === "Resolved").length} />
+          <Stat label="Total" value={reports.length} />
+        </div>
+
+        <nav className="mobile-view-nav maintenance-mobile-nav" aria-label="Maintenance views">
+          <button className="mobile-view-tab" type="button" aria-controls="maintenance-queue-panel" aria-pressed={mobilePanel === "queue"} onClick={() => setMobilePanel("queue")}>Queue</button>
+          <button className="mobile-view-tab" type="button" aria-controls="maintenance-facilities-panel" aria-pressed={mobilePanel === "facilities"} onClick={() => setMobilePanel("facilities")}>Facilities</button>
+        </nav>
+
+        <div className="maintenance-dashboard">
+        <section className="facility-section" id="maintenance-facilities-panel" data-mobile-view data-mobile-active={mobilePanel === "facilities"} aria-labelledby="facilities-title">
           <div className="section-heading">
             <div>
               <p className="eyebrow"><span className="eyebrow-index">02</span> FACILITY REGISTER</p>
@@ -685,10 +729,23 @@ export default function MaintenancePage() {
           </div>
         </section>
 
-        <section className="queue-section" aria-label="Maintenance reports">
+        <section className="queue-section" id="maintenance-queue-panel" data-mobile-view data-mobile-active={mobilePanel === "queue"} aria-labelledby="maintenance-reports-title">
+          <div className="section-heading queue-section-heading">
+            <div>
+              <p className="eyebrow"><span className="eyebrow-index">03</span> WORK ORDER FLOW</p>
+              <h2 className="section-title" id="maintenance-reports-title">Report queue</h2>
+            </div>
+            <span className="section-count">{reports.length.toString().padStart(2, "0")} RECORDS</span>
+          </div>
           <div className="queue-column-head" aria-hidden="true">
             <span>REPORT / LOCATION</span>
             <span>STATUS / NEXT ACTION</span>
+          </div>
+          <div className="queue-filters" aria-label="Filter work queue">
+            <label>Status <select className="text-input" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="ALL">All statuses</option><option value="SUBMITTED">Submitted</option><option value="ACKNOWLEDGED">Acknowledged</option><option value="IN_PROGRESS">In progress</option><option value="RESOLVED">Resolved</option></select></label>
+            <label>Priority <select className="text-input" value={priorityFilter} onChange={e => setPriorityFilter(e.target.value)}><option value="ALL">All priorities</option><option value="URGENT">Urgent</option><option value="HIGH">High</option><option value="NORMAL">Normal</option><option value="LOW">Low</option></select></label>
+            <label>Category <select className="text-input" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)}><option value="ALL">All categories</option>{Array.from(new Set(reports.map(report => report.category))).sort().map(value => <option key={value}>{value}</option>)}</select></label>
+            <label>Facility <select className="text-input" value={facilityFilter} onChange={e => setFacilityFilter(e.target.value)}><option value="ALL">All facilities</option>{Array.from(new Set(reports.map(report => report.facilities.name))).sort().map(value => <option key={value}>{value}</option>)}</select></label>
           </div>
 
           {updatesLoadError && !loading && (
@@ -705,13 +762,18 @@ export default function MaintenancePage() {
               </div>
             ) : reports.length === 0 ? (
               <p className="list-state">No reports are waiting in the queue.</p>
-            ) : reports.map((report) => (
+            ) : visibleReports.length === 0 ? (
+              <p className="list-state">No reports match these filters.</p>
+            ) : visibleReports.map((report) => (
               <article className="queue-row" key={report.id}>
                 <div className="queue-report-copy">
-                  <h2 className="report-title">{report.title}</h2>
+                  <p className="eyebrow">CASE / {report.id.slice(0, 8).toUpperCase()}</p>
+                  <h2 className="report-title"><Link href={`/reports/${report.id}`}>{report.title}</Link></h2>
                   <p className="report-location">
                     {report.facilities.room} <span aria-hidden="true">/</span> {report.facilities.name}
                   </p>
+                  <p className="report-location">{report.category} <span aria-hidden="true">/</span> {report.priority}</p>
+                  <p className="report-location">{report.assigned_to === auth?.user.id ? "Assigned to you" : report.assigned_to ? `Assigned · ${report.assigned_to.slice(0, 8)}` : "Unassigned"}</p>
                   <p className="report-description">{report.description}</p>
                   {(updatesByReportId[report.id] ?? []).slice(0, 2).map((update) => (
                     <div className="maintenance-update" key={update.id}>
@@ -723,21 +785,22 @@ export default function MaintenancePage() {
 
                 <div className="queue-row-action">
                   <Status status={report.status} />
-                  {report.status === "Pending" ? (
+                  {report.status === "Pending" || report.status === "SUBMITTED" ? (
                     <button className="button button-primary" type="button" onClick={() => {
                       setUpdateError(false);
-                      setPendingUpdate({ id: report.id, status: "In Progress", title: report.title, facilityName: report.facilities.name, room: report.facilities.room });
-                    }}>Start work</button>
-                  ) : report.status === "In Progress" ? (
+                      setPendingUpdate({ id: report.id, status: "ACKNOWLEDGED", title: report.title, facilityName: report.facilities.name, room: report.facilities.room });
+                    }}>Acknowledge</button>
+                  ) : report.status === "ACKNOWLEDGED" ? (
+                    <button className="button button-primary" type="button" onClick={() => setPendingUpdate({ id: report.id, status: "IN_PROGRESS", title: report.title, facilityName: report.facilities.name, room: report.facilities.room })}>Start work</button>
+                  ) : report.status === "In Progress" || report.status === "IN_PROGRESS" ? (
                     <button className="button button-resolve" type="button" onClick={() => {
                       setUpdateError(false);
-                      setPendingUpdate({ id: report.id, status: "Resolved", title: report.title, facilityName: report.facilities.name, room: report.facilities.room });
+                      setPendingUpdate({ id: report.id, status: "RESOLVED", title: report.title, facilityName: report.facilities.name, room: report.facilities.room });
                     }}>Mark resolved</button>
+                  ) : report.status === "RESOLVED" ? (
+                    <span className="completed-indicator">Resolved · awaiting closure</span>
                   ) : (
-                    <button className="button button-primary" type="button" onClick={() => {
-                      setUpdateError(false);
-                      setPendingUpdate({ id: report.id, status: "In Progress", title: report.title, facilityName: report.facilities.name, room: report.facilities.room });
-                    }}>Reopen Report</button>
+                    <span className="completed-indicator">Case {report.status.toLowerCase()}</span>
                   )}
 
                   <button className="button button-secondary button-add-update" type="button" onClick={() => {
@@ -745,15 +808,14 @@ export default function MaintenancePage() {
                     setUpdateMessage("");
                     setUpdateReport(report);
                   }}>Add Update</button>
-                  <button className="button button-secondary" type="button" onClick={() => {
-                    setUpdateError(false);
-                    setPendingUpdate({ id: report.id, status: "Archived", title: report.title, facilityName: report.facilities.name, room: report.facilities.room });
-                  }}>Remove Report</button>
+                  {!report.assigned_to && <button className="button button-secondary" type="button" onClick={async () => { const { error } = await supabase.from("reports").update({ assigned_to: auth?.user.id, updated_at: new Date().toISOString() }).eq("id", report.id); if (error) setLoadError(true); else await loadReports(); }}>Assign to me</button>}
+                  <Link className="button button-secondary" href={`/reports/${report.id}`}>Open case</Link>
                 </div>
               </article>
             ))}
           </div>
         </section>
+        </div>
       </div>
 
       {facilityDraft && (
@@ -890,16 +952,29 @@ export default function MaintenancePage() {
         </Dialog>
       )}
     </main>
-  );
+      );
+}
+
+export default function MaintenancePage() {
+  return <AuthGate roles={["MAINTENANCE", "ADMIN"]}><MaintenanceContent /></AuthGate>;
 }
 
 function Status({ status }: { status: ReportStatus }) {
-  const statusClass = status === "In Progress"
+  const statusClass = status === "In Progress" || status === "IN_PROGRESS"
     ? "status-in-progress"
-    : status === "Resolved"
+    : status === "Resolved" || status === "RESOLVED" || status === "CLOSED"
       ? "status-resolved"
       : "status-pending";
-  return <span className={`status ${statusClass}`}>{status}</span>;
+  return <span className={`status ${statusClass}`}>{status.replaceAll("_", " ")}</span>;
+}
+
+function Stat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="metric">
+      <span className="metric-label">{label}</span>
+      <strong className="metric-value">{value.toString().padStart(2, "0")}</strong>
+    </div>
+  );
 }
 
 function formatRelativeTime(timestamp: string) {

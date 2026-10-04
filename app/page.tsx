@@ -1,8 +1,10 @@
 "use client";
-
+// This is the main page for the SPOT student reporting interface. It allows students to report issues with facilities, view recent reports, and see live service updates. The page fetches data from Supabase and listens for real-time updates using the SpotRealtime library.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "./lib/supabase";
 import { useSpotRealtime, type SpotRealtimeRow } from "./lib/spot-realtime";
+import { AuthGate } from "./components/auth-gate";
+import { useSpotAuth } from "./lib/auth";
 
 type Facility = {
   id: string;
@@ -97,7 +99,9 @@ function mergeServiceUpdates(current: ServiceUpdate[], incoming: ServiceUpdate[]
     .slice(0, 20);
 }
 
-export default function Home() {
+function HomeContent() {
+  const { auth } = useSpotAuth();
+  const [mobilePanel, setMobilePanel] = useState<"report" | "activity" | "updates">("report");
   const [keycode, setKeycode] = useState("");
   const [facilities, setFacilities] = useState<Facility[]>([]);
   const [facilitiesLoading, setFacilitiesLoading] = useState(true);
@@ -117,6 +121,9 @@ export default function Home() {
   const [notice, setNotice] = useState<Notice>(null);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [category, setCategory] = useState("Other");
+  const [priority, setPriority] = useState("NORMAL");
+  const [attachmentUrl, setAttachmentUrl] = useState("");
 
   async function fetchReports() {
     const { data, error } = await supabase
@@ -339,6 +346,11 @@ export default function Home() {
         facility_id: facility.id,
         title: title.trim(),
         description: description.trim(),
+        user_id: auth?.user.id,
+        status: "SUBMITTED",
+        category,
+        priority,
+        attachment_urls: attachmentUrl.trim() ? [attachmentUrl.trim()] : [],
       });
 
       if (error) {
@@ -351,6 +363,9 @@ export default function Home() {
 
       setTitle("");
       setDescription("");
+      setCategory("Other");
+      setPriority("NORMAL");
+      setAttachmentUrl("");
       setShowReport(false);
       setFacility(null);
       setNotice({ kind: "success", text: "Report submitted successfully." });
@@ -372,8 +387,8 @@ export default function Home() {
     const id = record.id;
     const status = record.status;
     if (
-      typeof id !== "string" ||
-      (status !== "Pending" && status !== "In Progress" && status !== "Resolved" && status !== "Archived")
+      typeof id !== "string" || typeof status !== "string" ||
+      (!["Pending", "In Progress", "Resolved", "Archived", "SUBMITTED", "ACKNOWLEDGED", "IN_PROGRESS", "RESOLVED", "CLOSED"].includes(status))
     ) {
       return;
     }
@@ -489,12 +504,22 @@ export default function Home() {
           SPOT<span className="wordmark-mark">.</span>
         </span>
         <p className="header-context">FACILITY REPORTING / STUDENT</p>
+        {auth?.role === "MAINTENANCE" && <a className="text-button" href="/maintenance">Maintenance</a>}
+        {auth?.role === "ADMIN" && <a className="text-button" href="/admin">Admin</a>}
+        {auth && <button className="text-button" type="button" onClick={() => void supabase.auth.signOut()}>Sign out</button>}
       </header>
 
       <div className="page-content">
+        <nav className="mobile-view-nav" aria-label="Student views">
+          <button className="mobile-view-tab" type="button" aria-controls="student-report-panel" aria-pressed={mobilePanel === "report"} onClick={() => setMobilePanel("report")}>Report</button>
+          <button className="mobile-view-tab" type="button" aria-controls="student-activity-panel" aria-pressed={mobilePanel === "activity"} onClick={() => setMobilePanel("activity")}>Activity</button>
+          <button className="mobile-view-tab" type="button" aria-controls="student-updates-panel" aria-pressed={mobilePanel === "updates"} onClick={() => setMobilePanel("updates")}>Live</button>
+        </nav>
+        <div className="student-dashboard">
+          <div className="student-workflow" id="student-report-panel" data-mobile-view data-mobile-active={mobilePanel === "report"}>
         <section className="student-intro" aria-labelledby="page-title">
           <p className="eyebrow"><span className="eyebrow-index">01</span> REPORT AN ISSUE</p>
-          <h1 className="page-title" id="page-title">Facility issue</h1>
+          <h1 className="page-title" id="page-title">Facilities</h1>
           <p className="page-lede">
             Select the facility where you found an issue. You can also identify
             it manually with the posted keycode.
@@ -573,8 +598,9 @@ export default function Home() {
             )}
           </div>
         </section>
+          </div>
 
-        <section className="student-reports" aria-labelledby="reports-title">
+        <section className="student-reports" id="student-activity-panel" data-mobile-view data-mobile-active={mobilePanel === "activity"} aria-labelledby="reports-title">
           <div className="section-heading">
             <div>
               <p className="eyebrow"><span className="eyebrow-index">02</span> STATUS OVERVIEW</p>
@@ -587,11 +613,11 @@ export default function Home() {
             <Stat label="All reports" value={reports.length} />
             <Stat
               label="In progress"
-              value={reports.filter((report) => report.status === "In Progress").length}
+              value={reports.filter((report) => report.status === "In Progress" || report.status === "IN_PROGRESS").length}
             />
             <Stat
               label="Resolved"
-              value={reports.filter((report) => report.status === "Resolved").length}
+              value={reports.filter((report) => report.status === "Resolved" || report.status === "RESOLVED" || report.status === "CLOSED").length}
             />
           </div>
 
@@ -611,7 +637,7 @@ export default function Home() {
               reports.map((report) => (
                 <article className="student-report-row" key={report.id}>
                   <div className="report-row-main">
-                    <h3 className="report-title">{report.title}</h3>
+                    <h3 className="report-title"><a href={`/reports/${report.id}`}>{report.title}</a></h3>
                     <p className="report-location">
                       {report.facilities?.room} <span aria-hidden="true">/</span>{" "}
                       {report.facilities?.name}
@@ -624,8 +650,9 @@ export default function Home() {
             )}
           </div>
         </section>
+        </div>
 
-        <section className="live-service-section" aria-labelledby="live-service-title">
+        <section className="live-service-section" id="student-updates-panel" data-mobile-view data-mobile-active={mobilePanel === "updates"} aria-labelledby="live-service-title">
           <div className="section-heading">
             <div>
               <p className="eyebrow"><span className="eyebrow-index">03</span> LIVE SERVICE</p>
@@ -749,6 +776,16 @@ export default function Home() {
               rows={4}
               required
             />
+            <label className="field-label" htmlFor="report-category">Issue category</label>
+            <select id="report-category" className="text-input" value={category} onChange={event => setCategory(event.target.value)}>
+              {(["Other", "Electrical", "Plumbing", "HVAC", "Furniture", "Cleaning", "Safety", "Network"] as const).map(value => <option key={value}>{value}</option>)}
+            </select>
+            <label className="field-label" htmlFor="report-priority">Priority</label>
+            <select id="report-priority" className="text-input" value={priority} onChange={event => setPriority(event.target.value)}>
+              <option value="LOW">Low</option><option value="NORMAL">Normal</option><option value="HIGH">High</option><option value="URGENT">Urgent</option>
+            </select>
+            <label className="field-label" htmlFor="report-attachment">Photo link (optional)</label>
+            <input id="report-attachment" className="text-input" type="url" value={attachmentUrl} onChange={event => setAttachmentUrl(event.target.value)} placeholder="https://…" />
             <button
               className="button button-primary button-full"
               type="submit"
@@ -790,13 +827,13 @@ function Stat({ label, value }: { label: string; value: number }) {
 
 function Status({ status }: { status: string }) {
   const statusClass =
-    status === "In Progress"
+    status === "In Progress" || status === "IN_PROGRESS"
       ? "status-in-progress"
-      : status === "Resolved"
+      : status === "Resolved" || status === "RESOLVED" || status === "CLOSED"
         ? "status-resolved"
         : "status-pending";
 
-  return <span className={`status ${statusClass}`}>{status}</span>;
+  return <span className={`status ${statusClass}`}>{status.replaceAll("_", " ")}</span>;
 }
 
 function Dialog({
@@ -885,4 +922,8 @@ function Dialog({
       </section>
     </div>
   );
+}
+
+export default function Home() {
+  return <AuthGate><HomeContent /></AuthGate>;
 }
