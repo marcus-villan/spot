@@ -6,6 +6,8 @@ import { supabase } from "../lib/supabase";
 import { useSpotRealtime, type SpotRealtimeRow } from "../lib/spot-realtime";
 import { AuthGate } from "../components/auth-gate";
 import { useSpotAuth } from "../lib/auth";
+import { SiteHeader } from "../components/site-header";
+import { ReportListSkeleton } from "../components/skeletons";
 
 type ReportStatus = "SUBMITTED" | "ACKNOWLEDGED" | "IN_PROGRESS" | "RESOLVED" | "CLOSED" | "Pending" | "In Progress" | "Resolved" | "Archived";
 
@@ -593,17 +595,7 @@ function MaintenanceContent() {
 
   return (
     <main className="app-frame">
-      <header className="app-header">
-        <Link className="wordmark" href="/" aria-label="Spot home">
-          SPOT<span className="wordmark-mark">.</span>
-        </Link>
-        <p className="header-context">
-          <span className="desktop-header-context">FACILITY REPORTING / MAINTENANCE</span>
-          <span className="mobile-header-context">MAINTENANCE</span>
-        </p>
-        {auth?.role === "ADMIN" && <Link className="text-button" href="/admin">Admin</Link>}
-        {auth && <button className="text-button" type="button" onClick={() => void supabase.auth.signOut()}>Sign out</button>}
-      </header>
+      <SiteHeader context="MAINTENANCE / WORK QUEUE" />
 
       <div className="page-content">
         <section className="maintenance-intro" data-mobile-view data-mobile-active={mobilePanel === "queue"} aria-labelledby="queue-title">
@@ -661,7 +653,7 @@ function MaintenanceContent() {
 
           <div className="facility-list" aria-live="polite" aria-busy={facilitiesLoading}>
             {facilitiesLoading ? (
-              <p className="list-state">Loading facilities…</p>
+              <ReportListSkeleton count={2} />
             ) : facilitiesError ? (
               <div className="list-state list-state-error" role="alert">
                 <p>Facilities could not be loaded.</p>
@@ -754,7 +746,7 @@ function MaintenanceContent() {
 
           <div className="queue-list" aria-live="polite" aria-busy={loading}>
             {loading ? (
-              <p className="list-state">Loading reports…</p>
+              <ReportListSkeleton count={4} />
             ) : loadError ? (
               <div className="list-state list-state-error" role="alert">
                 <p>Reports could not be loaded.</p>

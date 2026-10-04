@@ -5,6 +5,8 @@ import { supabase } from "./lib/supabase";
 import { useSpotRealtime, type SpotRealtimeRow } from "./lib/spot-realtime";
 import { AuthGate } from "./components/auth-gate";
 import { useSpotAuth } from "./lib/auth";
+import { SiteHeader } from "./components/site-header";
+import { ReportListSkeleton } from "./components/skeletons";
 
 type Facility = {
   id: string;
@@ -25,6 +27,18 @@ type Report = {
     name: string;
     room: string;
   };
+};
+
+type PublicReport = {
+  id: string;
+  title: string;
+  facility_id: string;
+  facility_name: string;
+  room: string;
+  category: string;
+  status: string;
+  priority: string;
+  created_at: string;
 };
 
 type Notice = { kind: "success" | "error"; text: string } | null;
@@ -76,6 +90,10 @@ function mergeReports(current: Report[], incoming: Report[]) {
   );
 }
 
+function reportLabel(id: string) {
+  return `#SPT-${id.slice(0, 8).toUpperCase()}`;
+}
+
 function mergeServiceUpdates(current: ServiceUpdate[], incoming: ServiceUpdate[]) {
   const updatesById = new Map(
     incoming
@@ -109,9 +127,21 @@ function HomeContent() {
   const [facility, setFacility] = useState<Facility | null>(null);
   const archivedFacilityIdsRef = useRef(new Set<string>());
   const [reports, setReports] = useState<Report[]>([]);
+  const [myReportsLoaded, setMyReportsLoaded] = useState(false);
   const archivedReportIdsRef = useRef(new Set<string>());
   const [reportsLoading, setReportsLoading] = useState(true);
   const [reportsError, setReportsError] = useState(false);
+  const [reportView, setReportView] = useState<"all" | "mine">("all");
+  const [publicReports, setPublicReports] = useState<PublicReport[]>([]);
+  const [publicReportsLoading, setPublicReportsLoading] = useState(true);
+  const [publicReportsError, setPublicReportsError] = useState(false);
+  const [publicReportsHasMore, setPublicReportsHasMore] = useState(false);
+  const [publicSearch, setPublicSearch] = useState("");
+  const [publicFacility, setPublicFacility] = useState("");
+  const [publicCategory, setPublicCategory] = useState("");
+  const [publicStatus, setPublicStatus] = useState("");
+  const [selectedPublicReport, setSelectedPublicReport] = useState<PublicReport | null>(null);
+  const publicRequestRef = useRef(0);
   const [serviceUpdates, setServiceUpdates] = useState<ServiceUpdate[]>([]);
   const [serviceUpdatesLoading, setServiceUpdatesLoading] = useState(true);
   const [serviceUpdatesError, setServiceUpdatesError] = useState(false);
@@ -123,14 +153,14 @@ function HomeContent() {
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState("Other");
   const [priority, setPriority] = useState("NORMAL");
-  const [attachmentUrl, setAttachmentUrl] = useState("");
 
-  async function fetchReports() {
+  const fetchMyReports = useCallback(async () => {
     const { data, error } = await supabase
       .from("reports")
       .select(
         "id, title, description, status, created_at, updated_at, facilities(name, room)"
       )
+      .eq("user_id", auth?.user.id ?? "")
       .neq("status", "Archived")
       .order("created_at", { ascending: false });
 
@@ -138,14 +168,39 @@ function HomeContent() {
       reports: !error && data ? (data as unknown as Report[]) : null,
       hasError: Boolean(error),
     };
-  }
+  }, [auth?.user.id]);
 
-  async function loadReports() {
+  const fetchPublicReports = useCallback(async (offset: number, append: boolean) => {
+    const request = ++publicRequestRef.current;
+    setPublicReportsLoading(true);
+    setPublicReportsError(false);
+    try {
+      const { data, error } = await supabase.rpc("spot_public_report_directory", {
+        p_search: publicSearch.trim() || null,
+        p_facility_id: publicFacility || null,
+        p_category: publicCategory || null,
+        p_status: publicStatus || null,
+        p_limit: 50,
+        p_offset: offset,
+      });
+      if (error) throw error;
+      if (request !== publicRequestRef.current) return;
+      const page = (data ?? []) as PublicReport[];
+      setPublicReports((current) => append ? [...current, ...page] : page);
+      setPublicReportsHasMore(page.length === 50);
+    } catch {
+      if (request === publicRequestRef.current) setPublicReportsError(true);
+    } finally {
+      if (request === publicRequestRef.current) setPublicReportsLoading(false);
+    }
+  }, [publicSearch, publicFacility, publicCategory, publicStatus]);
+
+  const loadReports = useCallback(async () => {
     setReportsLoading(true);
     setReportsError(false);
 
     try {
-      const result = await fetchReports();
+      const result = await fetchMyReports();
       setReportsError(result.hasError);
       if (result.reports) {
         const activeReports = result.reports.filter(
@@ -162,8 +217,9 @@ function HomeContent() {
       setReportsError(true);
     } finally {
       setReportsLoading(false);
+      setMyReportsLoaded(true);
     }
-  }
+  }, [fetchMyReports]);
 
   async function fetchServiceUpdates() {
     const { data, error } = await supabase
@@ -252,30 +308,6 @@ function HomeContent() {
 
     loadInitialFacilities();
 
-    async function loadInitialReports() {
-      try {
-        const result = await fetchReports();
-        setReportsError(result.hasError);
-        if (result.reports) {
-          const activeReports = result.reports.filter(
-            (report) => !archivedReportIdsRef.current.has(report.id)
-          );
-          setReports((current) =>
-            mergeReports(
-              current.filter((report) => !archivedReportIdsRef.current.has(report.id)),
-              activeReports
-            )
-          );
-        }
-      } catch {
-        setReportsError(true);
-      } finally {
-        setReportsLoading(false);
-      }
-    }
-
-    loadInitialReports();
-
     async function loadInitialServiceUpdates() {
       try {
         const result = await fetchServiceUpdates();
@@ -295,6 +327,25 @@ function HomeContent() {
 
     loadInitialServiceUpdates();
   }, []);
+
+  useEffect(() => {
+    if (reportView !== "all") return;
+    const timer = setTimeout(() => {
+      setPublicReports([]);
+      setPublicReportsHasMore(false);
+      void fetchPublicReports(0, false);
+    }, 180);
+    return () => {
+      clearTimeout(timer);
+      publicRequestRef.current += 1;
+    };
+  }, [reportView, fetchPublicReports]);
+
+  useEffect(() => {
+    if (reportView !== "mine" || myReportsLoaded) return;
+    const timer = setTimeout(() => void loadReports(), 0);
+    return () => clearTimeout(timer);
+  }, [reportView, myReportsLoaded, loadReports]);
 
   async function findFacility() {
     if (!keycode.trim()) return;
@@ -350,7 +401,6 @@ function HomeContent() {
         status: "SUBMITTED",
         category,
         priority,
-        attachment_urls: attachmentUrl.trim() ? [attachmentUrl.trim()] : [],
       });
 
       if (error) {
@@ -365,11 +415,11 @@ function HomeContent() {
       setDescription("");
       setCategory("Other");
       setPriority("NORMAL");
-      setAttachmentUrl("");
       setShowReport(false);
       setFacility(null);
       setNotice({ kind: "success", text: "Report submitted successfully." });
       await loadReports();
+      setReportView("mine");
     } catch {
       setNotice({
         kind: "error",
@@ -499,20 +549,12 @@ function HomeContent() {
 
   return (
     <main className="app-frame">
-      <header className="app-header">
-        <span className="wordmark">
-          SPOT<span className="wordmark-mark">.</span>
-        </span>
-        <p className="header-context">FACILITY REPORTING / STUDENT</p>
-        {auth?.role === "MAINTENANCE" && <a className="text-button" href="/maintenance">Maintenance</a>}
-        {auth?.role === "ADMIN" && <a className="text-button" href="/admin">Admin</a>}
-        {auth && <button className="text-button" type="button" onClick={() => void supabase.auth.signOut()}>Sign out</button>}
-      </header>
+      <SiteHeader context="FACILITY REPORTING" />
 
       <div className="page-content">
         <nav className="mobile-view-nav" aria-label="Student views">
           <button className="mobile-view-tab" type="button" aria-controls="student-report-panel" aria-pressed={mobilePanel === "report"} onClick={() => setMobilePanel("report")}>Report</button>
-          <button className="mobile-view-tab" type="button" aria-controls="student-activity-panel" aria-pressed={mobilePanel === "activity"} onClick={() => setMobilePanel("activity")}>Activity</button>
+          <button className="mobile-view-tab" type="button" aria-controls="student-activity-panel" aria-pressed={mobilePanel === "activity"} onClick={() => setMobilePanel("activity")}>Reports</button>
           <button className="mobile-view-tab" type="button" aria-controls="student-updates-panel" aria-pressed={mobilePanel === "updates"} onClick={() => setMobilePanel("updates")}>Live</button>
         </nav>
         <div className="student-dashboard">
@@ -557,7 +599,7 @@ function HomeContent() {
 
           <div className="facility-list" aria-live="polite" aria-busy={facilitiesLoading}>
             {facilitiesLoading ? (
-              <p className="list-state">Loading facilities…</p>
+              <div className="facility-skeleton" aria-label="Loading facilities" role="status">{[0, 1, 2, 3].map(item => <div className="facility-tile-skeleton" key={item}><span className="skeleton skeleton-title" /><span className="skeleton skeleton-meta" /></div>)}</div>
             ) : facilitiesError ? (
               <div className="list-state list-state-error" role="alert">
                 <p>Facilities could not be loaded.</p>
@@ -603,52 +645,85 @@ function HomeContent() {
         <section className="student-reports" id="student-activity-panel" data-mobile-view data-mobile-active={mobilePanel === "activity"} aria-labelledby="reports-title">
           <div className="section-heading">
             <div>
-              <p className="eyebrow"><span className="eyebrow-index">02</span> STATUS OVERVIEW</p>
-              <h2 className="section-title" id="reports-title">Recent reports</h2>
+              <p className="eyebrow"><span className="eyebrow-index">02</span> CAMPUS DIRECTORY</p>
+              <h2 className="section-title" id="reports-title">Reports</h2>
             </div>
-            <span className="section-count">{reports.length.toString().padStart(2, "0")} RECORDS</span>
+            <span className="section-count">{reportView === "all" ? "PUBLIC FEED" : "PRIVATE CASES"}</span>
           </div>
 
-          <div className="metrics" aria-label="Report totals">
-            <Stat label="All reports" value={reports.length} />
-            <Stat
-              label="In progress"
-              value={reports.filter((report) => report.status === "In Progress" || report.status === "IN_PROGRESS").length}
-            />
-            <Stat
-              label="Resolved"
-              value={reports.filter((report) => report.status === "Resolved" || report.status === "RESOLVED" || report.status === "CLOSED").length}
-            />
+          <div className="report-view-switch" role="group" aria-label="Reports view">
+            <button type="button" aria-pressed={reportView === "all"} onClick={() => setReportView("all")}>All Reports</button>
+            <button type="button" aria-pressed={reportView === "mine"} onClick={() => setReportView("mine")}>My Reports</button>
           </div>
 
-          <div className="report-list" aria-live="polite" aria-busy={reportsLoading}>
-            {reportsLoading ? (
-              <p className="list-state">Loading reports…</p>
-            ) : reportsError ? (
-              <div className="list-state list-state-error" role="alert">
-                <p>Reports could not be loaded.</p>
-                <button className="text-button" type="button" onClick={loadReports}>
-                  Try again
-                </button>
-              </div>
-            ) : reports.length === 0 ? (
-              <p className="list-state">No reports have been submitted yet.</p>
-            ) : (
-              reports.map((report) => (
-                <article className="student-report-row" key={report.id}>
-                  <div className="report-row-main">
-                    <h3 className="report-title"><a href={`/reports/${report.id}`}>{report.title}</a></h3>
-                    <p className="report-location">
-                      {report.facilities?.room} <span aria-hidden="true">/</span>{" "}
-                      {report.facilities?.name}
-                    </p>
-                    <p className="report-description">{report.description}</p>
+          {reportView === "all" ? <>
+            <div className="directory-filters" aria-label="Filter campus reports">
+              <label className="directory-search-label">
+                <span className="sr-only">Search reports</span>
+                <input className="text-input" type="search" value={publicSearch} onChange={(event) => setPublicSearch(event.target.value.slice(0, 100))} placeholder="Search reports…" />
+              </label>
+              <label>
+                <span className="sr-only">Facility</span>
+                <select className="text-input" value={publicFacility} onChange={(event) => setPublicFacility(event.target.value)}>
+                  <option value="">All facilities</option>
+                  {facilities.map((item) => <option key={item.id} value={item.id}>{item.name} / {item.room}</option>)}
+                </select>
+              </label>
+              <label>
+                <span className="sr-only">Category</span>
+                <select className="text-input" value={publicCategory} onChange={(event) => setPublicCategory(event.target.value)}>
+                  <option value="">All categories</option>
+                  {(["Other", "Electrical", "Plumbing", "HVAC", "Furniture", "Cleaning", "Safety", "Network"] as const).map((value) => <option key={value}>{value}</option>)}
+                </select>
+              </label>
+              <label>
+                <span className="sr-only">Status</span>
+                <select className="text-input" value={publicStatus} onChange={(event) => setPublicStatus(event.target.value)}>
+                  <option value="">All statuses</option>
+                  {(["SUBMITTED", "ACKNOWLEDGED", "IN_PROGRESS", "RESOLVED", "CLOSED"] as const).map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}
+                </select>
+              </label>
+            </div>
+            <div className="report-list public-report-list" aria-live="polite" aria-busy={publicReportsLoading}>
+              {publicReportsLoading && publicReports.length === 0 ? <ReportListSkeleton count={3} /> : publicReportsError && publicReports.length === 0 ? (
+                <div className="list-state list-state-error" role="alert"><p>Campus reports could not be loaded.</p><button className="text-button" type="button" onClick={() => void fetchPublicReports(0, false)}>Try again</button></div>
+              ) : publicReports.length === 0 ? <p className="list-state">No campus reports match these filters.</p> : <>
+                {publicReports.map((report) => <article className="public-report-card" key={report.id}>
+                  <div className="public-report-heading">
+                    <div className="public-report-copy">
+                      <h3 className="public-report-title">{report.title?.trim() || report.category}</h3>
+                      <p className="report-location">{report.facility_name}<span aria-hidden="true"> · </span>Room {report.room}</p>
+                    </div>
                   </div>
+                  <div className="public-report-meta">
+                    <span>{reportLabel(report.id)}</span><span aria-hidden="true">·</span>
+                    <time dateTime={report.created_at}>{new Date(report.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</time><span aria-hidden="true">·</span>
+                    <span>{report.status.replaceAll("_", " ")}</span>
+                  </div>
+                  <div className="public-report-priority"><span className={`priority-badge priority-${report.priority.toLowerCase()}`}>{report.priority}</span></div>
+                  <button className="text-button public-report-open" type="button" onClick={() => setSelectedPublicReport(report)}>View public summary</button>
+                </article>)}
+                {publicReportsError ? <div className="list-state list-state-error" role="alert"><p>More campus reports could not be loaded.</p><button className="text-button" type="button" onClick={() => void fetchPublicReports(publicReports.length, true)}>Try again</button></div> : null}
+                {publicReportsHasMore ? <button className="button button-secondary directory-load-more" type="button" disabled={publicReportsLoading} onClick={() => void fetchPublicReports(publicReports.length, true)}>{publicReportsLoading ? "Loading…" : "Load more reports"}</button> : null}
+              </>}
+            </div>
+          </> : <>
+            <div className="metrics" aria-label="Your report totals">
+              <Stat label="My reports" value={reports.length} />
+              <Stat label="In progress" value={reports.filter((report) => report.status === "In Progress" || report.status === "IN_PROGRESS").length} />
+              <Stat label="Resolved" value={reports.filter((report) => report.status === "Resolved" || report.status === "RESOLVED" || report.status === "CLOSED").length} />
+            </div>
+            <div className="report-list" aria-live="polite" aria-busy={reportsLoading}>
+              {reportsLoading ? <ReportListSkeleton count={3} /> : reportsError ? (
+                <div className="list-state list-state-error" role="alert"><p>Your reports could not be loaded.</p><button className="text-button" type="button" onClick={loadReports}>Try again</button></div>
+              ) : reports.length === 0 ? <p className="list-state">You have not submitted any reports yet.</p> : reports.map((report) => (
+                <article className="student-report-row" key={report.id}>
+                  <div className="report-row-main"><h3 className="report-title"><a href={`/reports/${report.id}`}>{report.title}</a></h3><p className="report-location">{report.facilities?.room} <span aria-hidden="true">/</span> {report.facilities?.name}</p><p className="report-description">{report.description}</p></div>
                   <Status status={report.status} />
                 </article>
-              ))
-            )}
-          </div>
+              ))}
+            </div>
+          </>}
         </section>
         </div>
 
@@ -663,7 +738,7 @@ function HomeContent() {
 
           <div className="service-update-list" aria-live="polite" aria-busy={serviceUpdatesLoading}>
             {serviceUpdatesLoading ? (
-              <p className="list-state">Loading service updates…</p>
+              <ReportListSkeleton count={2} />
             ) : serviceUpdatesError ? (
               <div className="list-state list-state-error" role="alert">
                 <p>Service updates could not be loaded.</p>
@@ -784,8 +859,6 @@ function HomeContent() {
             <select id="report-priority" className="text-input" value={priority} onChange={event => setPriority(event.target.value)}>
               <option value="LOW">Low</option><option value="NORMAL">Normal</option><option value="HIGH">High</option><option value="URGENT">Urgent</option>
             </select>
-            <label className="field-label" htmlFor="report-attachment">Photo link (optional)</label>
-            <input id="report-attachment" className="text-input" type="url" value={attachmentUrl} onChange={event => setAttachmentUrl(event.target.value)} placeholder="https://…" />
             <button
               className="button button-primary button-full"
               type="submit"
@@ -796,6 +869,20 @@ function HomeContent() {
           </form>
         </Dialog>
       )}
+      {selectedPublicReport && <Dialog title={selectedPublicReport.title?.trim() || selectedPublicReport.category} description={`${selectedPublicReport.facility_name} · Room ${selectedPublicReport.room}`} onClose={() => setSelectedPublicReport(null)}>
+        <p className="public-summary-meta">
+          <span>{reportLabel(selectedPublicReport.id)}</span><span aria-hidden="true">·</span>
+          <time dateTime={selectedPublicReport.created_at}>{new Date(selectedPublicReport.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</time><span aria-hidden="true">·</span>
+          <span>{selectedPublicReport.status.replaceAll("_", " ")}</span>
+        </p>
+        <dl className="public-report-details">
+          <dt>Facility</dt><dd>{selectedPublicReport.facility_name}</dd>
+          <dt>Location</dt><dd>{selectedPublicReport.room}</dd>
+          <dt>Status</dt><dd>{selectedPublicReport.status.replaceAll("_", " ")}</dd>
+          <dt>Priority</dt><dd>{selectedPublicReport.priority}</dd>
+          <dt>Reported</dt><dd>{new Date(selectedPublicReport.created_at).toLocaleString()}</dd>
+        </dl>
+      </Dialog>}
     </main>
   );
 }

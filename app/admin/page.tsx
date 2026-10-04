@@ -6,6 +6,8 @@ import { supabase } from "../lib/supabase";
 import { AuthGate } from "../components/auth-gate";
 import { useSpotAuth, type SpotRole } from "../lib/auth";
 import { useSpotRealtime } from "../lib/spot-realtime";
+import { SiteHeader } from "../components/site-header";
+import { AnalyticsSkeleton } from "../components/skeletons";
 
 type Profile = { id: string; email: string | null; role: SpotRole; created_at: string };
 type Facility = { id: string; name: string; room: string; is_archived: boolean };
@@ -131,7 +133,7 @@ function AnalyticsDashboard() {
         <p className="page-lede">Facility, priority, category, and status counts from persisted Spot reports.</p>
       </div>
 
-      {loading && !data ? <p className="list-state analytics-state" role="status">Loading report analytics…</p> : null}
+      {loading && !data ? <AnalyticsSkeleton /> : null}
       {error ? (
         <div className="list-state-error analytics-state" role="alert">
           <p>Analytics could not be loaded. Check your connection and try again.</p>
@@ -243,7 +245,8 @@ function percent(value: number, max: number) {
 }
 
 function categoryColor(index: number, total: number) {
-  return `hsl(${(index * 360) / total} 48% 38%)`;
+  const tones = ["#46514d", "#69736f", "#89918d", "#a5aaa7", "#b58664"];
+  return tones[index % Math.min(total, tones.length)];
 }
 
 function Stat({ label, value }: { label: string; value: number }) {
@@ -281,12 +284,15 @@ function AdminContent() {
   const { auth } = useSpotAuth();
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [message, setMessage] = useState("");
+  const [profilesLoading, setProfilesLoading] = useState(true);
   const loadProfiles = useCallback(async () => {
+    setProfilesLoading(true);
     const { data: people, error } = await supabase
       .from("profiles")
       .select("id,email,role,created_at")
       .order("created_at", { ascending: false });
     if (error) setMessage("Could not load user directory."); else { setProfiles((people ?? []) as Profile[]); setMessage(""); }
+    setProfilesLoading(false);
   }, []);
 
   useEffect(() => { async function initialLoad() { await loadProfiles(); } void initialLoad(); }, [loadProfiles]);
@@ -298,13 +304,13 @@ function AdminContent() {
   }
 
   return <main className="app-frame">
-    <header className="app-header"><Link className="wordmark" href="/">SPOT<span className="wordmark-mark">.</span></Link><p className="header-context">ADMINISTRATION</p>{auth && <button className="text-button" onClick={() => void supabase.auth.signOut()}>Sign out</button>}</header>
+    <SiteHeader context="ADMINISTRATION" />
     <div className="page-content">
       <AnalyticsDashboard />
       <section className="facility-section admin-users-section">
         <div className="section-heading"><div><p className="eyebrow">ACCESS MANAGEMENT</p><h2 className="section-title">Users</h2></div><Link className="button button-secondary" href="/maintenance">Maintenance queue</Link></div>
         {message && <p className="form-error" role="alert">{message}</p>}
-        <div className="queue-list">{profiles.map(profile => <article className="queue-row" key={profile.id}><div className="queue-report-copy"><h3 className="report-title">{profile.email ?? "No email"}</h3><p className="report-location">Joined {new Date(profile.created_at).toLocaleDateString()} · {profile.id.slice(0, 8)}</p></div><label className="field-label">Role <select aria-label={`Role for ${profile.email ?? profile.id}`} className="text-input" value={profile.role} disabled={profile.id === auth?.user.id} onChange={e => void changeRole(profile.id, e.target.value as SpotRole)}><option value="USER">User</option><option value="MAINTENANCE">Maintenance</option><option value="ADMIN">Admin</option></select></label></article>)}</div>
+        {profilesLoading ? <div className="skeleton-list" aria-label="Loading user directory" role="status">{[0, 1, 2].map(row => <article className="skeleton-report" key={row}><div className="skeleton-copy"><span className="skeleton skeleton-title" /><span className="skeleton skeleton-meta" /></div><span className="skeleton skeleton-badge" /></article>)}</div> : profiles.length ? <div className="queue-list">{profiles.map(profile => <article className="queue-row" key={profile.id}><div className="queue-report-copy"><h3 className="report-title">{profile.email ?? "No email"}</h3><p className="report-location">Joined {new Date(profile.created_at).toLocaleDateString()} · {profile.id.slice(0, 8)}</p></div><label className="field-label">Role <select aria-label={`Role for ${profile.email ?? profile.id}`} className="text-input" value={profile.role} disabled={profile.id === auth?.user.id} onChange={e => void changeRole(profile.id, e.target.value as SpotRole)}><option value="USER">User</option><option value="MAINTENANCE">Maintenance</option><option value="ADMIN">Admin</option></select></label></article>)}</div> : <p className="list-state">No user profiles found.</p>}
         <p className="page-lede admin-users-note">New accounts start as USER. Bootstrap the first administrator by changing that account’s role in Supabase SQL Editor to ADMIN.</p>
       </section>
     </div>
